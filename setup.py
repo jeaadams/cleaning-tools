@@ -4,7 +4,7 @@ setup(
     name="cleaning-tools",
     version="0.1.0",
     description="General ALMA data cleaning and visualization tools",
-    author="Your Name",
+    author="Jane Huang",
     package_dir={"": "src"},
     packages=find_packages(where="src"),
     install_requires=[
