@@ -5,6 +5,7 @@ General tools for ALMA data cleaning and visualization.
 ## Features
 
 - **Channel Map Plotting**: Visualize channel maps with optional contour overlays
+  - **Interactive widget viewer** with channel slider and toggles (NEW!)
   - Keplerian mask contours (from FITS files)
   - CARTA-style sigma contours (3σ, 5σ, etc.)
   - CARTA-style Gaussian smoothing before contouring
@@ -20,6 +21,8 @@ pip install -e .
 
 See [examples/channel_maps_demo.ipynb](examples/channel_maps_demo.ipynb) for detailed usage examples.
 
+### Interactive Widget Viewer
+
 ```python
 from cleaning_tools import ChannelMapPlotter
 
@@ -29,7 +32,18 @@ plotter = ChannelMapPlotter(
     keplerian_mask_path='path/to/mask.fits'  # optional
 )
 
-# Plot channel maps with sigma contours
+# Launch interactive viewer (in Jupyter notebook)
+plotter.plot_interactive(
+    sigma_levels=[3, 5, 10],
+    smooth_sigma=1.7,
+    zoom_size=100
+)
+```
+
+### Static Channel Maps
+
+```python
+# Create static channel map figures
 plotter.plot_channel_maps(
     start_channel=20,
     end_channel=50,
@@ -46,3 +60,4 @@ plotter.plot_channel_maps(
 - astropy
 - scipy
 - bettermoments
+- ipywidgets (for interactive viewer)

@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 from astropy.io import fits
 from scipy.ndimage import gaussian_filter
 import bettermoments as bm
+from ipywidgets import interact, IntSlider, Checkbox, FloatSlider, VBox, HBox, Layout
 
 
 class ChannelMapPlotter:
@@ -448,3 +449,304 @@ class ChannelMapPlotter:
             'rms': self.rms,
             'rms_mjy': self.rms * 1000 if self.rms is not None else None
         }
+
+    def plot_interactive(self, sigma_levels=[3, 5], smooth_sigma=1.7,
+                        zoom_size=None, contour_region=None, cmap='RdBu_r',
+                        vmin_sigma=-2, vmax_sigma=10, keplerian_color='lime',
+                        keplerian_linewidth=1.5, sigma_color='black',
+                        sigma_linewidth=1.5, figsize=(8, 8)):
+        """
+        Create an interactive channel map viewer with slider controls.
+
+        This creates an ipywidgets interface with:
+        - Channel slider to navigate through the cube
+        - Toggle for showing/hiding sigma contours
+        - Toggle for showing/hiding Keplerian mask
+        - Smoothing sigma slider
+
+        Parameters
+        ----------
+        sigma_levels : list of float, optional
+            Sigma levels for contours (e.g., [3, 5, 10]). Default: [3, 5]
+        smooth_sigma : float, optional
+            Initial Gaussian smoothing sigma in pixels. Default: 1.7 (CARTA-style)
+        zoom_size : int, optional
+            Size in pixels from center to display. If None, shows full image.
+        contour_region : float, optional
+            If specified, only show contours within this radius (in arcseconds)
+            from the center. Useful for masking noise at image edges. Default: None
+        cmap : str, optional
+            Matplotlib colormap name. Default: 'RdBu_r'
+        vmin_sigma : float, optional
+            Lower color limit in units of sigma. Default: -2
+        vmax_sigma : float, optional
+            Upper color limit in units of sigma. Default: 10
+        keplerian_color : str, optional
+            Color for Keplerian mask contours. Default: 'lime'
+        keplerian_linewidth : float, optional
+            Line width for Keplerian mask contours. Default: 1.5
+        sigma_color : str, optional
+            Color for sigma contours. Default: 'black'
+        sigma_linewidth : float, optional
+            Line width for sigma contours. Default: 1.5
+        figsize : tuple, optional
+            Figure size (width, height) in inches. Default: (8, 8)
+
+        Returns
+        -------
+        ipywidgets.interact
+            Interactive widget object
+        """
+        nchans = len(self.velax)
+        _, ny, nx = self.data.shape
+        cy, cx = ny // 2, nx // 2
+
+        # Pre-calculate native RMS to avoid repeated calculation
+        print("Pre-calculating RMS for native resolution...")
+        native_rms = self.calculate_rms()
+        print(f"Native RMS: {native_rms*1000:.3f} mJy/beam")
+
+        # Pre-calculate initial smoothed cube and RMS
+        if smooth_sigma > 0:
+            print(f"Pre-calculating smoothed cube (sigma={smooth_sigma:.1f})...")
+            initial_smoothed = self.get_smoothed_cube(smooth_sigma)
+            initial_rms = self.calculate_rms_smoothed(smooth_sigma)
+            print(f"Smoothed RMS: {initial_rms*1000:.3f} mJy/beam")
+
+        # Determine zoom
+        if zoom_size is None:
+            y_start, y_end = 0, ny
+            x_start, x_end = 0, nx
+        else:
+            y_start = max(0, cy - zoom_size)
+            y_end = min(ny, cy + zoom_size)
+            x_start = max(0, cx - zoom_size)
+            x_end = min(nx, cx + zoom_size)
+
+        # Get WCS extent
+        extent = self.get_wcs_extent()
+
+        # Calculate zoomed extent if available
+        extent_zoomed = None
+        if extent:
+            x_max, x_min, y_min_full, y_max_full = extent
+            x_range = np.linspace(x_max, x_min, nx)
+            y_range = np.linspace(y_min_full, y_max_full, ny)
+            extent_zoomed = [
+                x_range[x_end - 1], x_range[x_start],
+                y_range[y_start], y_range[y_end - 1]
+            ]
+
+        # Cache for RMS values at different smoothing levels
+        rms_cache = {0: native_rms}
+        if smooth_sigma > 0:
+            rms_cache[smooth_sigma] = initial_rms
+
+        # Create the figure once outside the update function
+        fig, ax = plt.subplots(figsize=figsize)
+
+        # Initialize plot elements that we'll update
+        im_artist = None
+        contour_artists = []
+        mask_contour_artists = []
+        center_marker = None
+        title_obj = None
+
+        def plot_channel(channel, show_sigma_contours, show_keplerian,
+                        smoothing_sigma):
+            """Inner plotting function for interactive widget."""
+            nonlocal im_artist, contour_artists, mask_contour_artists, center_marker, title_obj
+
+            # Get smoothed or native data (use cache when possible)
+            if smoothing_sigma > 0:
+                # Check if we need to recalculate
+                if smoothing_sigma not in rms_cache:
+                    rms_cache[smoothing_sigma] = self.calculate_rms_smoothed(smoothing_sigma)
+                rms = rms_cache[smoothing_sigma]
+                cube_to_plot = self.get_smoothed_cube(smoothing_sigma)
+            else:
+                rms = native_rms
+                cube_to_plot = self.data
+
+            # Get channel data
+            channel_data_full = cube_to_plot[channel, :, :]
+            channel_data = channel_data_full[y_start:y_end, x_start:x_end]
+
+            # Calculate peak SNR
+            peak_signal = np.nanmax(channel_data)
+            snr = peak_signal / rms
+
+            # Color scaling
+            vmin = vmin_sigma * rms
+            vmax = max(vmax_sigma * rms, peak_signal * 1.2)
+
+            # Clear previous contours - more robust approach
+            for cs in contour_artists:
+                # QuadContourSet uses 'collections' (a LineCollection list)
+                if hasattr(cs, 'collections'):
+                    for coll in cs.collections:
+                        if coll in ax.collections:
+                            coll.remove()
+                # Fallback for other contour types
+                elif hasattr(cs, 'remove'):
+                    cs.remove()
+            contour_artists.clear()
+
+            for cs in mask_contour_artists:
+                if hasattr(cs, 'collections'):
+                    for coll in cs.collections:
+                        if coll in ax.collections:
+                            coll.remove()
+                elif hasattr(cs, 'remove'):
+                    cs.remove()
+            mask_contour_artists.clear()
+
+            # Remove center marker
+            if center_marker is not None:
+                for marker in center_marker:
+                    if marker in ax.lines:
+                        marker.remove()
+                center_marker = None
+
+            # Create mask for contour region if specified
+            contour_mask = None
+            if contour_region is not None and extent_zoomed:
+                # Create a circular mask centered on (0, 0) in arcseconds
+                Y_grid, X_grid = np.mgrid[0:channel_data.shape[0], 0:channel_data.shape[1]]
+                # Map to physical coordinates
+                x_coords = np.linspace(extent_zoomed[0], extent_zoomed[1], channel_data.shape[1])
+                y_coords = np.linspace(extent_zoomed[2], extent_zoomed[3], channel_data.shape[0])
+                X_phys, Y_phys = np.meshgrid(x_coords, y_coords)
+                radius = np.sqrt(X_phys**2 + Y_phys**2)
+                contour_mask = radius > contour_region
+
+            # Update or create image
+            if im_artist is None:
+                # First time - create everything
+                if extent_zoomed:
+                    im_artist = ax.imshow(channel_data, origin='lower', cmap=cmap,
+                                  vmin=vmin, vmax=vmax, extent=extent_zoomed,
+                                  aspect='auto')
+                else:
+                    im_artist = ax.imshow(channel_data, origin='lower', cmap=cmap,
+                                  vmin=vmin, vmax=vmax, aspect='auto')
+
+                # Add colorbar
+                cbar = plt.colorbar(im_artist, ax=ax, fraction=0.046, pad=0.04)
+                cbar.set_label('Intensity [Jy/beam]', fontsize=10)
+
+                # Set axis labels
+                if extent_zoomed:
+                    ax.set_xlabel('ΔRA [arcsec]', fontsize=11)
+                    ax.set_ylabel('ΔDEC [arcsec]', fontsize=11)
+                else:
+                    ax.set_xlabel('X [pixels]', fontsize=11)
+                    ax.set_ylabel('Y [pixels]', fontsize=11)
+            else:
+                # Update existing image data
+                im_artist.set_data(channel_data)
+                im_artist.set_clim(vmin, vmax)
+
+            # Add sigma contours
+            if show_sigma_contours and sigma_levels:
+                levels_pos = np.array(sigma_levels) * rms
+                levels_pos = levels_pos[levels_pos < peak_signal]
+                if len(levels_pos) > 0:
+                    # Apply mask if specified
+                    data_for_contours = channel_data.copy()
+                    if contour_mask is not None:
+                        data_for_contours[contour_mask] = np.nan
+
+                    if extent_zoomed:
+                        X, Y = np.meshgrid(
+                            np.linspace(extent_zoomed[0], extent_zoomed[1],
+                                      channel_data.shape[1]),
+                            np.linspace(extent_zoomed[2], extent_zoomed[3],
+                                      channel_data.shape[0])
+                        )
+                        cs = ax.contour(X, Y, data_for_contours, levels=levels_pos,
+                                     colors=sigma_color, linewidths=sigma_linewidth,
+                                     alpha=0.8)
+                    else:
+                        cs = ax.contour(data_for_contours, levels=levels_pos,
+                                     colors=sigma_color, linewidths=sigma_linewidth,
+                                     alpha=0.8)
+                    contour_artists.append(cs)
+
+            # Add Keplerian mask contours
+            if show_keplerian and self.keplerian_mask is not None:
+                mask_channel = self.keplerian_mask[channel, y_start:y_end,
+                                                   x_start:x_end]
+                if np.any(mask_channel > 0):
+                    # Apply region mask if specified
+                    mask_for_contours = mask_channel.copy()
+                    if contour_mask is not None:
+                        mask_for_contours[contour_mask] = 0
+
+                    if extent_zoomed:
+                        cs_mask = ax.contour(X, Y, mask_for_contours, levels=[0.5],
+                                 colors=keplerian_color,
+                                 linewidths=keplerian_linewidth,
+                                 alpha=0.8)
+                    else:
+                        cs_mask = ax.contour(mask_for_contours, levels=[0.5],
+                                 colors=keplerian_color,
+                                 linewidths=keplerian_linewidth,
+                                 alpha=0.8)
+                    mask_contour_artists.append(cs_mask)
+
+            # Add center marker if zoomed
+            if zoom_size is not None:
+                if extent_zoomed:
+                    center_marker = ax.plot(0, 0, '+', color='yellow', markersize=12,
+                           markeredgewidth=2)
+                else:
+                    center_x = channel_data.shape[1] // 2
+                    center_y = channel_data.shape[0] // 2
+                    center_marker = ax.plot(center_x, center_y, '+', color='yellow',
+                           markersize=12, markeredgewidth=2)
+
+            # Update title with SNR info
+            color = 'green' if snr > 5 else ('orange' if snr > 3 else 'red')
+            title_text = (f'Channel {channel}: {self.velax[channel]:.2f} km/s\n'
+                         f'Peak: {snr:.1f}σ ({peak_signal*1000:.2f} mJy/beam), '
+                         f'RMS: {rms*1000:.3f} mJy/beam')
+            ax.set_title(title_text, fontsize=12, color=color, fontweight='bold',
+                        pad=10)
+
+            # Redraw the canvas
+            fig.canvas.draw_idle()
+
+        # Create interactive widget
+        return interact(
+            plot_channel,
+            channel=IntSlider(
+                value=nchans // 2,
+                min=0,
+                max=nchans - 1,
+                step=1,
+                description='Channel:',
+                continuous_update=False,
+                layout=Layout(width='600px')
+            ),
+            show_sigma_contours=Checkbox(
+                value=True,
+                description=f'Show sigma contours ({sigma_levels})',
+                layout=Layout(width='300px')
+            ),
+            show_keplerian=Checkbox(
+                value=self.keplerian_mask is not None,
+                description='Show Keplerian mask',
+                disabled=self.keplerian_mask is None,
+                layout=Layout(width='300px')
+            ),
+            smoothing_sigma=FloatSlider(
+                value=smooth_sigma,
+                min=0,
+                max=5.0,
+                step=0.1,
+                description='Smooth σ:',
+                continuous_update=False,
+                layout=Layout(width='600px')
+            )
+        )

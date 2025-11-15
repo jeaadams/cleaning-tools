@@ -13,6 +13,10 @@ setup(
         "astropy",
         "scipy",
         "bettermoments",
+        "ipywidgets",
     ],
+    extras_require={
+        "interactive": ["ipympl"],  # For faster interactive performance
+    },
     python_requires=">=3.8",
 )
